@@ -1,0 +1,85 @@
+# =====================================================================================
+# Silver tables - CRM  [FREE EDITION]
+# -------------------------------------------------------------------------------------
+# source_schema_name is bronze_crm and silver_schema_name is silver_crm. On Free Edition
+# both live in the same catalog, so distinct schemas are what keeps a silver table from
+# overwriting the bronze table it reads.
+# =====================================================================================
+
+defaults:
+  source_catalog_name: bronze          # logical token -> the single Free Edition catalog
+  source_schema_name: bronze_crm
+  target_catalog_name: silver          # same physical catalog, different schema
+  silver_schema_name: silver_crm
+  dq_enabled: true
+  quarantine_enabled: true
+  deduplicate: true
+  is_enabled: true
+
+silver_control:
+
+  # ---------------------------------------------------------------------------------
+  # SCD2: the sample data's second batch changes a customer's segment, so re-running
+  # the pipeline demonstrates a closed version plus a new active one.
+  # ---------------------------------------------------------------------------------
+  - source_table_name: customer
+    silver_table_name: customer
+    load_type: scd2
+    read_mode: cdf
+    business_keys: [customer_id]
+    sequence_by: source_updated_at
+    select_expressions:
+      - "CAST(customer_id AS BIGINT) AS customer_id"
+      - "trim(customer_name) AS customer_name"
+      - "lower(trim(email)) AS email"
+      - "upper(trim(country_code)) AS country_code"
+      - "nullif(trim(customer_segment), '') AS customer_segment"
+      - "CAST(credit_limit AS DECIMAL(18,2)) AS credit_limit"
+      - "CAST(created_at AS TIMESTAMP) AS source_created_at"
+      - "CAST(last_modified_ts AS TIMESTAMP) AS source_updated_at"
+      - "_source_file"
+      - "_ingest_ts"
+    dq_failure_threshold_pct: 40.0
+    cluster_by: [customer_id]
+
+  # ---------------------------------------------------------------------------------
+  # SCD1: only the current state of an order matters downstream.
+  # ---------------------------------------------------------------------------------
+  - source_table_name: sales_order
+    silver_table_name: sales_order
+    load_type: scd1
+    read_mode: stream
+    business_keys: [order_id]
+    sequence_by: source_updated_at
+    filter_condition: "order_status <> 'DRAFT'"
+    select_expressions:
+      - "CAST(order_id AS BIGINT) AS order_id"
+      - "CAST(customer_id AS BIGINT) AS customer_id"
+      - "upper(trim(order_status)) AS order_status"
+      - "CAST(order_date AS DATE) AS order_date"
+      - "CAST(delivery_date AS DATE) AS delivery_date"
+      - "CAST(order_amount AS DECIMAL(18,2)) AS order_amount"
+      - "upper(trim(currency_code)) AS currency_code"
+      - "CAST(last_modified_ts AS TIMESTAMP) AS source_updated_at"
+      - "_source_file"
+      - "_ingest_ts"
+    dq_failure_threshold_pct: 40.0
+    cluster_by: [order_date, customer_id]
+
+  # ---------------------------------------------------------------------------------
+  # Append-only events.
+  # ---------------------------------------------------------------------------------
+  - source_table_name: interaction_event
+    silver_table_name: interaction_event
+    load_type: append
+    read_mode: stream
+    business_keys: [event_id]
+    select_expressions:
+      - "event_id"
+      - "CAST(customer_id AS BIGINT) AS customer_id"
+      - "upper(trim(event_type)) AS event_type"
+      - "CAST(event_ts AS TIMESTAMP) AS event_ts"
+      - "CAST(event_date AS DATE) AS event_date"
+      - "channel"
+      - "_ingest_ts"
+    partition_columns: [event_date]

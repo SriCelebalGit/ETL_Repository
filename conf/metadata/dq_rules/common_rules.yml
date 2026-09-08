@@ -1,0 +1,168 @@
+# =====================================================================================
+# DQ rule registry
+# -------------------------------------------------------------------------------------
+# Rules are reusable and parameterised. `{column}` is replaced with the column the rule
+# is assigned to; any other `{placeholder}` is filled from rule_parameters (defaults
+# here, overridable per assignment).
+#
+# A rule expression must be TRUE for a row that PASSES.
+#
+# rule_type: sql       - a boolean SQL expression, evaluated with F.expr
+# rule_type: function  - a python function registered in framework/dq/functions.py.
+#                        Use it when the check needs a window, a lookup, or logic that
+#                        does not read well as one SQL clause.
+# =====================================================================================
+
+defaults:
+  is_enabled: true
+
+dq_rules:
+
+  # ---------------------------------------- completeness ----------------------------
+  - rule_id: DQ_NOT_NULL
+    rule_name: Column is not null
+    rule_type: sql
+    rule: "{column} IS NOT NULL"
+    dq_dimension: completeness
+    default_severity: drop
+    description: The column must carry a value.
+
+  - rule_id: DQ_NOT_BLANK
+    rule_name: Column is not blank
+    rule_type: sql
+    rule: "{column} IS NOT NULL AND length(trim({column})) > 0"
+    dq_dimension: completeness
+    default_severity: drop
+    description: The column must be present and not whitespace only.
+
+  # ---------------------------------------- validity --------------------------------
+  - rule_id: DQ_POSITIVE
+    rule_name: Value is positive
+    rule_type: sql
+    rule: "{column} IS NULL OR {column} > 0"
+    dq_dimension: validity
+    default_severity: drop
+    description: A non-null value must be greater than zero.
+
+  - rule_id: DQ_NON_NEGATIVE
+    rule_name: Value is not negative
+    rule_type: sql
+    rule: "{column} IS NULL OR {column} >= 0"
+    dq_dimension: validity
+    default_severity: drop
+    description: A non-null value must not be negative.
+
+  - rule_id: DQ_RANGE
+    rule_name: Value is within range
+    rule_type: sql
+    rule: "{column} IS NULL OR ({column} BETWEEN {min} AND {max})"
+    rule_parameters:
+      min: 0
+      max: 1000000
+    dq_dimension: validity
+    default_severity: drop
+    description: A non-null value must fall inside the configured range.
+
+  - rule_id: DQ_REGEX
+    rule_name: Value matches a pattern
+    rule_type: sql
+    rule: "{column} IS NULL OR {column} RLIKE '{pattern}'"
+    rule_parameters:
+      pattern: ".*"
+    dq_dimension: validity
+    default_severity: drop
+    description: A non-null value must match the configured regular expression.
+
+  - rule_id: DQ_EMAIL_FORMAT
+    rule_name: Email is well formed
+    rule_type: sql
+    # Deliberately permissive: rejecting valid-but-unusual addresses is worse than
+    # letting an odd one through, because a rejected customer disappears from silver.
+    rule: "{column} IS NULL OR {column} RLIKE '^[^@\\\\s]+@[^@\\\\s]+\\\\.[^@\\\\s]{2,}$'"
+    dq_dimension: validity
+    default_severity: warning
+    description: Structural email check.
+
+  - rule_id: DQ_IN_LIST
+    rule_name: Value is in an allowed list
+    rule_type: sql
+    rule: "{column} IS NULL OR {column} IN ({allowed_values})"
+    rule_parameters:
+      allowed_values: "''"
+    dq_dimension: validity
+    default_severity: drop
+    description: A non-null value must be one of the allowed values (quoted, comma separated).
+
+  - rule_id: DQ_LENGTH_EQUALS
+    rule_name: Value has an exact length
+    rule_type: sql
+    rule: "{column} IS NULL OR length(trim({column})) = {length}"
+    rule_parameters:
+      length: 2
+    dq_dimension: validity
+    default_severity: drop
+    description: Fixed-width code check, e.g. a two-character country code.
+
+  # ---------------------------------------- uniqueness ------------------------------
+  - rule_id: DQ_UNIQUE
+    rule_name: Value is unique in the batch
+    rule_type: function
+    rule: is_unique
+    rule_parameters:
+      scope: ""
+    dq_dimension: uniqueness
+    default_severity: drop
+    description: >-
+      The value must appear exactly once in the batch. Set scope to make it
+      unique-within-group, e.g. scope: region_code.
+
+  # ---------------------------------------- consistency -----------------------------
+  - rule_id: DQ_REFERENCE_EXISTS
+    rule_name: Value exists in a reference table
+    rule_type: function
+    rule: exists_in_reference
+    rule_parameters:
+      reference_table: ""
+      reference_column: ""
+    dq_dimension: consistency
+    default_severity: warning
+    description: >-
+      Referential integrity against a code list or dimension. The reference is
+      collected to the driver, so keep it to a small table.
+
+  - rule_id: DQ_COMPARE_COLUMNS
+    rule_name: Two columns compare correctly
+    rule_type: sql
+    rule: "{column} IS NULL OR {other} IS NULL OR {column} {operator} {other}"
+    rule_parameters:
+      other: ""
+      operator: "<="
+    dq_dimension: consistency
+    default_severity: drop
+    description: Cross-column check, e.g. start_date <= end_date.
+
+  # ---------------------------------------- timeliness ------------------------------
+  - rule_id: DQ_NOT_FUTURE_DATED
+    rule_name: Date is not in the future
+    rule_type: function
+    rule: is_not_future_dated
+    rule_parameters:
+      tolerance_days: 1
+    dq_dimension: timeliness
+    default_severity: warning
+    description: >-
+      Guards against source clock skew and bad date parsing. The tolerance absorbs
+      timezone differences between the source and the platform.
+
+  # ---------------------------------------- accuracy --------------------------------
+  - rule_id: DQ_OUTLIER_STDDEV
+    rule_name: Value is not a statistical outlier
+    rule_type: function
+    rule: is_within_stddev
+    rule_parameters:
+      sigmas: 4
+    dq_dimension: accuracy
+    default_severity: warning
+    description: >-
+      Flags measures far from the batch mean. Use severity warning - an outlier is a
+      signal worth investigating, not proof the row is wrong.

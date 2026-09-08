@@ -1,0 +1,56 @@
+# =====================================================================================
+# Databricks Asset Bundle - ETL Framework  [FREE EDITION]
+# -------------------------------------------------------------------------------------
+# Deploy:  databricks bundle deploy -t free
+# Run:     databricks bundle run lakehouse_master_job -t free
+#
+# Differences from the paid bundle, and why:
+#
+#   * No job_clusters, no new_cluster, no node_type_id, no spark_version. Free Edition
+#     is serverless-only, so tasks omit compute entirely and the platform provides it.
+#     A task that names a job cluster is rejected at deploy time.
+#
+#   * No runtime_engine / data_security_mode / spark_conf. All of those are cluster
+#     properties with no serverless equivalent - serverless is already Photon-backed and
+#     runs single-user by construction.
+#
+#   * No run_as service principal. Free Edition is a single-user workspace.
+#
+#   * No bronze_streaming_job. A continuously triggered query never terminates, which is
+#     a poor fit for Free Edition's serverless budget - so every feed here is
+#     load_type: batch and drains with trigger(availableNow=True).
+#
+#   * Concurrency is 2, not 8-16. There is only so much serverless capacity, and higher
+#     fan-out just queues.
+#
+# Using the CLI is optional. The notebooks can be run in order by hand, which is the
+# faster way to see the framework work the first time - see README.md.
+# =====================================================================================
+
+bundle:
+  name: etl_framework_free
+
+include:
+  - resources/jobs/*.yml
+
+variables:
+  environment:
+    description: Environment name, selects conf/framework.<env>.yml
+    default: free
+
+  layer_concurrency:
+    description: Tables processed in parallel per layer. Keep low on Free Edition.
+    default: 2
+
+  notification_email:
+    description: Address notified when a job run fails. Use your own account email.
+    default: ""
+
+targets:
+  free:
+    mode: development
+    default: true
+    workspace:
+      # Free Edition workspace URL, e.g. https://dbc-xxxxxxxx-xxxx.cloud.databricks.com
+      host: https://REPLACE-WITH-YOUR-FREE-EDITION-HOST
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}

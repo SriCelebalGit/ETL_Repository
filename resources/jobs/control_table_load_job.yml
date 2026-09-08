@@ -1,0 +1,71 @@
+# =====================================================================================
+# Setup + control table load job  [FREE EDITION - serverless]
+# -------------------------------------------------------------------------------------
+# Creates the framework namespaces and Volumes, generates the sample landing data, then
+# loads the metadata YAML into the control tables.
+#
+# The sample data task is the one addition over the paid version: on Free Edition there is
+# no external system dropping files, so the pipeline needs something to ingest.
+#
+# Run with dry_run=true to validate the metadata without writing to the control tables.
+# =====================================================================================
+
+resources:
+  jobs:
+    control_table_load_job:
+      name: "[free] Setup and control table load"
+      description: >-
+        Creates schemas, Volumes and the control/audit tables, writes sample landing
+        files, then loads conf/metadata/**.yml into the control tables as SCD Type-2.
+
+      tags:
+        framework: etl
+        environment: free
+        purpose: setup
+
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+
+      parameters:
+        - name: environment
+          default: ${var.environment}
+        - name: tables
+          default: all
+        - name: prune_missing
+          default: "true"
+        - name: dry_run
+          default: "false"
+        - name: sample_data_batch
+          default: "1"
+        - name: reset_landing
+          default: "false"
+
+      tasks:
+        # The catalog check inside this notebook is the fastest way to find out that the
+        # configured catalog name does not match the workspace.
+        - task_key: setup_framework
+          notebook_task:
+            notebook_path: ../../notebooks/00_setup_framework.py
+            base_parameters:
+              environment: "{{job.parameters.environment}}"
+
+        - task_key: generate_sample_data
+          depends_on:
+            - task_key: setup_framework
+          notebook_task:
+            notebook_path: ../../notebooks/02_generate_sample_data.py
+            base_parameters:
+              environment: "{{job.parameters.environment}}"
+              batch: "{{job.parameters.sample_data_batch}}"
+              reset: "{{job.parameters.reset_landing}}"
+
+        - task_key: load_control_tables
+          depends_on:
+            - task_key: generate_sample_data
+          notebook_task:
+            notebook_path: ../../notebooks/01_load_control_tables.py
+            base_parameters:
+              environment: "{{job.parameters.environment}}"
+              tables: "{{job.parameters.tables}}"
+              prune_missing: "{{job.parameters.prune_missing}}"
+              dry_run: "{{job.parameters.dry_run}}"

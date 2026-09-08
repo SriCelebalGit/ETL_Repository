@@ -1,0 +1,175 @@
+# =====================================================================================
+# Master Lakehouse job  [FREE EDITION - serverless]
+# -------------------------------------------------------------------------------------
+# Same shape as the paid version: a discovery task reads the control tables and publishes
+# the table list, then each layer fans out with a for_each task. Nothing here names a
+# table, so adding a feed is a YAML commit.
+#
+# Every task omits compute. On Free Edition that means serverless, which is the only
+# option - naming a job cluster fails at deploy time.
+#
+# No schedule is set. Free Edition has a serverless budget, and an unattended nightly
+# run will quietly consume it; trigger this by hand while testing.
+# =====================================================================================
+
+resources:
+  jobs:
+    lakehouse_master_job:
+      name: "[free] Lakehouse master pipeline"
+      description: >-
+        Metadata driven bronze -> silver -> gold load on serverless compute. Feeds come
+        from the control tables; the task list is discovered at run time.
+
+      tags:
+        framework: etl
+        environment: free
+
+      # A second concurrent run would compete for the same Auto Loader checkpoints.
+      max_concurrent_runs: 1
+
+      # Serverless start-up is fast, but the whole batch is still small - anything past
+      # an hour means something is stuck, not slow.
+      timeout_seconds: 3600
+
+      parameters:
+        - name: environment
+          default: ${var.environment}
+        - name: source_system
+          default: ""
+
+      tasks:
+        # -------------------------------------------------------------------------
+        # 1. Discover the work
+        # -------------------------------------------------------------------------
+        - task_key: discover
+          notebook_task:
+            notebook_path: ../../notebooks/05_discover_tasks.py
+            base_parameters:
+              environment: "{{job.parameters.environment}}"
+              source_system: "{{job.parameters.source_system}}"
+              # Every Free Edition feed is batch; there is nothing to exclude.
+              include_streaming: "false"
+
+        # -------------------------------------------------------------------------
+        # 2. Bronze - Auto Loader from the landing Volume
+        # -------------------------------------------------------------------------
+        - task_key: bronze
+          depends_on:
+            - task_key: discover
+          for_each_task:
+            inputs: "{{tasks.discover.values.bronze_tables}}"
+            concurrency: ${var.layer_concurrency}
+            task:
+              task_key: bronze_table
+              notebook_task:
+                notebook_path: ../../notebooks/10_bronze_loader.py
+                base_parameters:
+                  environment: "{{job.parameters.environment}}"
+                  catalog_name: "{{input.catalog}}"
+                  schema_name: "{{input.schema}}"
+                  table_name: "{{input.table}}"
+                  batch_id: "{{tasks.discover.values.batch_id}}"
+              timeout_seconds: 1800
+              # A new column makes addNewColumns fail the stream once, then succeed on
+              # the retry with the column added - so at least one retry is required.
+              max_retries: 2
+              min_retry_interval_millis: 30000
+              retry_on_timeout: false
+
+        # -------------------------------------------------------------------------
+        # 3. Silver - DQ checks and SCD loading
+        # -------------------------------------------------------------------------
+        - task_key: silver
+          depends_on:
+            - task_key: bronze
+          for_each_task:
+            inputs: "{{tasks.discover.values.silver_tables}}"
+            concurrency: ${var.layer_concurrency}
+            task:
+              task_key: silver_table
+              notebook_task:
+                notebook_path: ../../notebooks/20_silver_loader.py
+                base_parameters:
+                  environment: "{{job.parameters.environment}}"
+                  catalog_name: "{{input.catalog}}"
+                  schema_name: "{{input.schema}}"
+                  table_name: "{{input.table}}"
+                  batch_id: "{{tasks.discover.values.batch_id}}"
+              timeout_seconds: 1800
+              # A fail-severity DQ rule is a deterministic rejection, so retrying only
+              # repeats the verdict. One retry covers transient infrastructure errors.
+              max_retries: 1
+              min_retry_interval_millis: 30000
+
+        # -------------------------------------------------------------------------
+        # 4. Gold - dimensions, then facts, then aggregates
+        # -------------------------------------------------------------------------
+        - task_key: gold_dimensions
+          depends_on:
+            - task_key: silver
+          for_each_task:
+            inputs: "{{tasks.discover.values.gold_dimensions}}"
+            concurrency: ${var.layer_concurrency}
+            task:
+              task_key: gold_dimension
+              notebook_task:
+                notebook_path: ../../notebooks/30_gold_loader.py
+                base_parameters:
+                  environment: "{{job.parameters.environment}}"
+                  catalog_name: "{{input.catalog}}"
+                  schema_name: "{{input.schema}}"
+                  table_name: "{{input.table}}"
+                  batch_id: "{{tasks.discover.values.batch_id}}"
+              timeout_seconds: 1800
+              max_retries: 1
+
+        - task_key: gold_facts
+          depends_on:
+            - task_key: gold_dimensions
+          for_each_task:
+            inputs: "{{tasks.discover.values.gold_facts}}"
+            concurrency: ${var.layer_concurrency}
+            task:
+              task_key: gold_fact
+              notebook_task:
+                notebook_path: ../../notebooks/30_gold_loader.py
+                base_parameters:
+                  environment: "{{job.parameters.environment}}"
+                  catalog_name: "{{input.catalog}}"
+                  schema_name: "{{input.schema}}"
+                  table_name: "{{input.table}}"
+                  batch_id: "{{tasks.discover.values.batch_id}}"
+              timeout_seconds: 1800
+              max_retries: 1
+
+        - task_key: gold_aggregates
+          depends_on:
+            - task_key: gold_facts
+          for_each_task:
+            inputs: "{{tasks.discover.values.gold_aggregates}}"
+            concurrency: ${var.layer_concurrency}
+            task:
+              task_key: gold_aggregate
+              notebook_task:
+                notebook_path: ../../notebooks/30_gold_loader.py
+                base_parameters:
+                  environment: "{{job.parameters.environment}}"
+                  catalog_name: "{{input.catalog}}"
+                  schema_name: "{{input.schema}}"
+                  table_name: "{{input.table}}"
+                  batch_id: "{{tasks.discover.values.batch_id}}"
+              timeout_seconds: 900
+              max_retries: 1
+
+        # -------------------------------------------------------------------------
+        # 5. Batch summary - always runs, and fails the run if any task failed
+        # -------------------------------------------------------------------------
+        - task_key: batch_summary
+          depends_on:
+            - task_key: gold_aggregates
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../../notebooks/90_batch_summary.py
+            base_parameters:
+              environment: "{{job.parameters.environment}}"
+              batch_id: "{{tasks.discover.values.batch_id}}"

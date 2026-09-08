@@ -1,0 +1,77 @@
+# =====================================================================================
+# Gold objects - sales mart  [FREE EDITION]
+# -------------------------------------------------------------------------------------
+# target_schema_name is gold_sales. All three layers share one catalog on Free Edition,
+# so the schema is what separates them.
+#
+# depends_on uses the logical `gold` token, which resolves to the same physical catalog
+# as bronze and silver here - the framework's pre-flight check handles that correctly
+# because it resolves the token before looking the table up.
+# =====================================================================================
+
+defaults:
+  target_catalog_name: gold
+  target_schema_name: gold_sales
+  is_enabled: true
+
+gold_control:
+
+  # ---------------------------------------------------------------------------------
+  # Customer dimension, SCD2 so the surrogate history stays stable for facts already
+  # pointing at a historical version.
+  # ---------------------------------------------------------------------------------
+  - table_name: dim_customer
+    object_type: dimension
+    transformation_type: module
+    module_name: transformations.gold.dim_customer
+    load_type: scd2
+    business_keys: [customer_id]
+    sequence_by: source_updated_at
+    scd2_hash_columns: [customer_name, email, country_code, customer_segment, credit_band]
+    cluster_by: [customer_id]
+    parameters:
+      default_segment: UNKNOWN
+
+  # ---------------------------------------------------------------------------------
+  # Date dimension - generated, so rebuilt in full. Narrowed to a few years to keep
+  # the Free Edition run quick.
+  # ---------------------------------------------------------------------------------
+  - table_name: dim_date
+    object_type: dimension
+    transformation_type: module
+    module_name: transformations.gold.dim_date
+    load_type: overwrite
+    parameters:
+      start_date: "2024-01-01"
+      end_date: "2027-12-31"
+      fiscal_year_start_month: "4"
+
+  # ---------------------------------------------------------------------------------
+  # Sales fact. The sample orders are dated within the last few days, so the default
+  # 7-day lookback picks them all up.
+  # ---------------------------------------------------------------------------------
+  - table_name: fct_sales
+    object_type: fact
+    transformation_type: module
+    module_name: transformations.gold.fct_sales
+    load_type: delete_insert
+    business_keys: [order_id]
+    depends_on:
+      - gold.gold_sales.dim_customer
+      - gold.gold_sales.dim_date
+    partition_columns: [order_date]
+    parameters:
+      lookback_days: "30"
+
+  # ---------------------------------------------------------------------------------
+  # Daily aggregate expressed as SQL.
+  # ---------------------------------------------------------------------------------
+  - table_name: agg_daily_sales_by_segment
+    object_type: aggregate
+    transformation_type: sql
+    sql_file_name: agg_daily_sales_by_segment.sql
+    load_type: overwrite
+    depends_on:
+      - gold.gold_sales.fct_sales
+      - gold.gold_sales.dim_customer
+    cluster_by: [order_date]

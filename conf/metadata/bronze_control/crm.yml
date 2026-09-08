@@ -1,0 +1,81 @@
+# =====================================================================================
+# Bronze feeds - CRM source system  [FREE EDITION]
+# -------------------------------------------------------------------------------------
+# Differences from the ADLS version:
+#
+#   * file_location is a UC Volume path, not abfss://. notebooks/02_generate_sample_data.py
+#     writes the sample files into these exact paths.
+#
+#   * bronze_schema_name is bronze_crm, not crm. All three layers share one catalog on
+#     Free Edition, so if bronze and silver both used schema "crm" they would resolve to
+#     the same table and the silver load would overwrite its own source.
+#
+#   * The interaction_event feed is load_type: batch, not stream. Free Edition has no
+#     cloud queue for file notifications, and a continuously triggered query would hold a
+#     serverless job open indefinitely. Auto Loader still reads it incrementally.
+# =====================================================================================
+
+defaults:
+  source_system: crm
+  target_catalog_name: bronze          # logical token -> the single Free Edition catalog
+  bronze_schema_name: bronze_crm
+  load_type: batch
+  schema_evolution_mode: addNewColumns
+  add_ingestion_metadata: true
+  normalise_column_names: true
+  is_enabled: true
+
+bronze_control:
+
+  # ---------------------------------------------------------------------------------
+  # CSV customer extract, appended as-is.
+  # ---------------------------------------------------------------------------------
+  - source_entity_name: CUSTOMER
+    bronze_table_name: customer
+    source_file_type: csv
+    file_location: /Volumes/workspace/etl_volumes/landing/crm/customer/
+    source_file_pattern: "*.csv"
+    reader_options:
+      header: true
+      delimiter: ","
+      # The sample data has a quoted address containing a comma and a newline.
+      multiLine: true
+      escape: '"'
+      mode: PERMISSIVE
+    schema_hints: "customer_id BIGINT, credit_limit DECIMAL(18,2), created_at TIMESTAMP"
+    write_mode: append
+    cluster_by: [_ingest_ts]
+    table_properties:
+      # The silver row for this table uses read_mode: cdf, which needs this.
+      delta.enableChangeDataFeed: true
+
+  # ---------------------------------------------------------------------------------
+  # JSON order extract. Merged, not appended: the sample generator re-sends the same
+  # order ids with a later last_modified_ts on a second run, to demonstrate the upsert.
+  # ---------------------------------------------------------------------------------
+  - source_entity_name: SALES_ORDER
+    bronze_table_name: sales_order
+    source_file_type: json
+    file_location: /Volumes/workspace/etl_volumes/landing/crm/sales_order/
+    source_file_pattern: "*.json"
+    reader_options:
+      # The generator writes JSON Lines - one object per line.
+      multiLine: false
+    write_mode: merge
+    primary_keys: [order_id]
+    sequence_by: last_modified_ts
+    cluster_by: [order_date, customer_id]
+    max_files_per_trigger: 50
+
+  # ---------------------------------------------------------------------------------
+  # Parquet interaction events. Batch on Free Edition (see the header note).
+  # Partitioned by event_date because every downstream query is date bounded.
+  # ---------------------------------------------------------------------------------
+  - source_entity_name: INTERACTION_EVENT
+    bronze_table_name: interaction_event
+    source_file_type: parquet
+    file_location: /Volumes/workspace/etl_volumes/landing/crm/interaction_event/
+    load_type: batch
+    write_mode: append
+    partition_columns: [event_date]
+    max_files_per_trigger: 50

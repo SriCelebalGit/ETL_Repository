@@ -1,0 +1,11 @@
+# Local development and CI only.
+#
+# On Databricks, pyspark and PyYAML are already present in the runtime - do not install
+# pyspark onto a cluster, it will conflict with the runtime's own build.
+#
+# pyspark is pinned to the version in DBR 15.4 LTS so local test results match cluster
+# behaviour. Java 17 is required by that build.
+pyspark==3.5.3
+PyYAML>=6.0
+pytest>=7.4
+pytest-cov>=4.1

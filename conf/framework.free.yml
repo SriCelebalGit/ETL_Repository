@@ -1,0 +1,80 @@
+# =====================================================================================
+# Framework configuration - DATABRICKS FREE EDITION
+# -------------------------------------------------------------------------------------
+# Differences from the ADLS-based configuration, and why:
+#
+#   * checkpoint_root is a UC Volume path. Free Edition has no storage credential, so
+#     abfss:// is unavailable. Auto Loader's schema store and streaming checkpoints go
+#     into a managed Volume instead.
+#
+#   * All three layer catalogs point at ONE catalog. Free Edition gives you a single
+#     workspace catalog, and creating more is not guaranteed.
+#
+#   * Because the layers share a catalog, their SCHEMAS must differ - otherwise
+#     bronze "crm.customer" and silver "crm.customer" resolve to the same table and
+#     the silver load would overwrite its own source. Hence bronze_crm / silver_crm /
+#     gold_sales in the metadata YAML.
+#
+#   * use_notifications is false and cannot be changed. File notification mode needs
+#     cloud queue resources that Free Edition does not provide. Directory listing is
+#     used, which is fine at any volume you can generate here.
+#
+# BEFORE YOU RUN: confirm your catalog name. In Free Edition it is usually `workspace`,
+# but check with:   SHOW CATALOGS;
+# If yours differs, change every occurrence below.
+# =====================================================================================
+
+environment: free
+
+# ---- where the framework's own tables live -----------------------------------------
+framework_catalog: workspace
+control_schema: etl_control
+audit_schema: etl_audit
+
+# ---- logical -> physical catalog mapping --------------------------------------------
+# All three resolve to the same catalog here. The layers stay separated by schema,
+# which the metadata YAML sets as bronze_crm / silver_crm / gold_sales.
+catalogs:
+  bronze: workspace
+  silver: workspace
+  gold: workspace
+
+# ---- storage ------------------------------------------------------------------------
+# A managed UC Volume. notebooks/00_setup_framework.py creates it.
+# Deleting anything under here makes Auto Loader re-ingest from scratch.
+checkpoint_root: /Volumes/workspace/etl_volumes/checkpoints
+
+# ---- Free-Edition-only settings used by the setup notebook --------------------------
+# The framework itself ignores these; notebook 00 reads them to build the namespaces.
+free_edition:
+  # Catalog creation is skipped - the catalog above must already exist.
+  create_catalogs: false
+  volumes_schema: etl_volumes
+  landing_volume: landing
+  checkpoint_volume: checkpoints
+  # Layer schemas created up front so the first run does not fail on a missing one.
+  layer_schemas:
+    - bronze_crm
+    - silver_crm
+    - gold_sales
+
+# ---- defaults applied when a control column is NULL --------------------------------
+defaults:
+  schema_evolution_mode: addNewColumns
+  rescued_data_column: _rescued_data
+  infer_column_types: true
+  trigger_interval: 1 minute
+  # Not optional on Free Edition - there is no event grid / SQS to notify from.
+  use_notifications: false
+
+  bronze_write_mode: append
+  silver_read_mode: batch
+
+  # Used by notebook 00 and by TransformContext.silver() when a transformation does
+  # not name a schema explicitly.
+  bronze_schema: bronze_crm
+  silver_schema: silver_crm
+  gold_schema: gold_sales
+
+log_level: INFO
+framework_version: 1.0.0-free
