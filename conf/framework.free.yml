@@ -1,62 +1,99 @@
 # =====================================================================================
 # Framework configuration - DATABRICKS FREE EDITION
 # -------------------------------------------------------------------------------------
+# This file is the single source of truth for names and locations. Change a catalog here
+# and re-run notebooks/00_setup_framework.py - it creates whatever this file names.
+#
 # Differences from the ADLS-based configuration, and why:
 #
 #   * checkpoint_root is a UC Volume path. Free Edition has no storage credential, so
 #     abfss:// is unavailable. Auto Loader's schema store and streaming checkpoints go
-#     into a managed Volume instead.
-#
-#   * All three layer catalogs point at ONE catalog. Free Edition gives you a single
-#     workspace catalog, and creating more is not guaranteed.
-#
-#   * Because the layers share a catalog, their SCHEMAS must differ - otherwise
-#     bronze "crm.customer" and silver "crm.customer" resolve to the same table and
-#     the silver load would overwrite its own source. Hence bronze_crm / silver_crm /
-#     gold_sales in the metadata YAML.
+#     into a managed Volume instead. A path containing "://" is rejected at config load.
 #
 #   * use_notifications is false and cannot be changed. File notification mode needs
-#     cloud queue resources that Free Edition does not provide. Directory listing is
-#     used, which is fine at any volume you can generate here.
+#     cloud queue resources Free Edition does not provide, so Auto Loader uses directory
+#     listing - fine at any volume you can generate here.
 #
-# BEFORE YOU RUN: confirm your catalog name. In Free Edition it is usually `workspace`,
-# but check with:   SHOW CATALOGS;
-# If yours differs, change every occurrence below.
+#   * No schedule and low concurrency, to stay inside the serverless budget.
+#
+# THE ONE THING TO GET RIGHT: catalog naming. See the two layouts below.
 # =====================================================================================
 
 environment: free
 
-# ---- where the framework's own tables live -----------------------------------------
-framework_catalog: workspace
+# =====================================================================================
+# LAYOUT A - single catalog, schema per layer  (the default, safest on Free Edition)
+# -------------------------------------------------------------------------------------
+# All three layer tokens resolve to one catalog. The layers are separated by SCHEMA,
+# which the metadata YAML sets as bronze_crm / silver_crm / gold_sales.
+#
+# This matters: with one catalog, if bronze and silver both used schema "crm" then
+# bronze.crm.customer and silver.crm.customer would be the SAME table and the silver
+# load would overwrite its own source. Notebook 00 fails the setup if it detects that.
+#
+# `etl_lakehouse` is created for you. To reuse a catalog you already have (Free Edition
+# usually ships `workspace`), put its name in all four places below.
+# =====================================================================================
+
+framework_catalog: etl_lakehouse
 control_schema: etl_control
 audit_schema: etl_audit
 
-# ---- logical -> physical catalog mapping --------------------------------------------
-# All three resolve to the same catalog here. The layers stay separated by schema,
-# which the metadata YAML sets as bronze_crm / silver_crm / gold_sales.
 catalogs:
-  bronze: workspace
-  silver: workspace
-  gold: workspace
+  bronze: etl_lakehouse
+  silver: etl_lakehouse
+  gold: etl_lakehouse
 
-# ---- storage ------------------------------------------------------------------------
-# A managed UC Volume. notebooks/00_setup_framework.py creates it.
-# Deleting anything under here makes Auto Loader re-ingest from scratch.
-checkpoint_root: /Volumes/workspace/etl_volumes/checkpoints
+checkpoint_root: /Volumes/etl_lakehouse/etl_volumes/checkpoints
 
-# ---- Free-Edition-only settings used by the setup notebook --------------------------
-# The framework itself ignores these; notebook 00 reads them to build the namespaces.
+# =====================================================================================
+# LAYOUT B - catalog per layer  (closer to a production deployment)
+# -------------------------------------------------------------------------------------
+# Uncomment this block and comment out Layout A above. Notebook 00 creates all four
+# catalogs. Everything else - the metadata YAML included - works unchanged, because
+# control rows carry the logical tokens `bronze` / `silver` / `gold`, not catalog names.
+#
+# framework_catalog: etl_framework
+# control_schema: control
+# audit_schema: audit
+#
+# catalogs:
+#   bronze: etl_bronze
+#   silver: etl_silver
+#   gold:   etl_gold
+#
+# checkpoint_root: /Volumes/etl_framework/etl_volumes/checkpoints
+#
+# With Layout B the layer schemas no longer need their prefixes - bronze_crm could be
+# just crm - but leaving them as they are costs nothing and keeps one set of metadata
+# working under both layouts.
+# =====================================================================================
+
+# ---- what notebook 00 provisions ---------------------------------------------------
+# Read only by notebooks/00_setup_framework.py. The framework's runtime path ignores it.
 free_edition:
-  # Catalog creation is skipped - the catalog above must already exist.
-  create_catalogs: false
+  # Attempt CREATE CATALOG for anything named above that does not exist yet. If your
+  # workspace refuses it, notebook 00 says so and tells you how to fall back to a
+  # catalog you already have.
+  create_catalogs: true
+
+  # Where the two Volumes live. Defaults to framework_catalog when volumes_catalog is
+  # omitted; checkpoint_root must point inside the checkpoint volume, and notebook 00
+  # verifies that.
+  volumes_catalog: etl_lakehouse
   volumes_schema: etl_volumes
   landing_volume: landing
   checkpoint_volume: checkpoints
-  # Layer schemas created up front so the first run does not fail on a missing one.
+
+  # Schemas to create per layer. Each is created in THAT layer's catalog, so this works
+  # under both layouts above. Keys are the logical layer tokens.
   layer_schemas:
-    - bronze_crm
-    - silver_crm
-    - gold_sales
+    bronze:
+      - bronze_crm
+    silver:
+      - silver_crm
+    gold:
+      - gold_sales
 
 # ---- defaults applied when a control column is NULL --------------------------------
 defaults:
@@ -70,7 +107,7 @@ defaults:
   bronze_write_mode: append
   silver_read_mode: batch
 
-  # Used by notebook 00 and by TransformContext.silver() when a transformation does
+  # Used by notebook 00 and by TransformContext.silver() when a gold transformation does
   # not name a schema explicitly.
   bronze_schema: bronze_crm
   silver_schema: silver_crm
