@@ -1,11 +1,12 @@
 -- =====================================================================================
 -- Metadata Driven ETL Framework :: CONTROL TABLES (DDL)  [FREE EDITION]
 -- -------------------------------------------------------------------------------------
--- Deployed into the framework catalog/schema, e.g. workspace.etl_control
+-- Deployed into the framework catalog/schema, e.g. etl_lakehouse.etl_control
 --
--- FREE EDITION: there is no CREATE CATALOG here. Free Edition gives you one workspace
--- catalog and creating others is not guaranteed, so the catalog named by
--- conf/framework.free.yml must already exist. Only the schema is created.
+-- FREE EDITION: there is no CREATE CATALOG here. notebooks/00_setup_framework.py creates
+-- the catalogs named in conf/framework.<env>.yml before running this script, so that it
+-- can report a clear error if the workspace refuses catalog creation. Only the schema is
+-- created here.
 -- Executed by notebooks/00_setup_framework.py, which substitutes ${fw_catalog}
 -- and ${fw_schema} from conf/framework.<env>.yml before running each statement.
 --
@@ -30,7 +31,7 @@ CREATE TABLE IF NOT EXISTS ${fw_catalog}.${fw_schema}.bronze_control_table (
     source_system            STRING    NOT NULL COMMENT 'Logical source system name, e.g. crm, erp, salesforce',
     source_entity_name       STRING             COMMENT 'ENHANCEMENT: object/entity name as known in the source system',
     source_file_type         STRING    NOT NULL COMMENT 'csv | json | parquet | avro | orc | text | binaryFile | xml',
-    file_location            STRING    NOT NULL COMMENT 'Full landing path. FREE EDITION: a UC Volume path, e.g. /Volumes/workspace/etl_volumes/landing/crm/customer/',
+    file_location            STRING    NOT NULL COMMENT 'Full landing path. FREE EDITION: a UC Volume path, e.g. /Volumes/etl_lakehouse/etl_volumes/landing/crm/customer/. The metadata YAML writes this as a landing_root token so it follows the framework config',
     source_file_pattern      STRING             COMMENT 'ENHANCEMENT: cloudFiles.pathGlobFilter, e.g. *.csv',
 
     -- ---------------------------- target identification ----------------------------

@@ -1,16 +1,17 @@
 # =====================================================================================
 # Silver tables - CRM  [FREE EDITION]
 # -------------------------------------------------------------------------------------
-# source_schema_name is bronze_crm and silver_schema_name is silver_crm. On Free Edition
-# both live in the same catalog, so distinct schemas are what keeps a silver table from
-# overwriting the bronze table it reads.
+# ${bronze_schema} and ${silver_schema} come from the defaults block of
+# conf/framework.<env>.yml (bronze_crm / silver_crm). When both layers share one catalog,
+# distinct schemas are what keeps a silver table from overwriting the bronze table it
+# reads - so these must never resolve to the same value.
 # =====================================================================================
 
 defaults:
   source_catalog_name: bronze          # logical token -> the single Free Edition catalog
-  source_schema_name: bronze_crm
+  source_schema_name: ${bronze_schema}
   target_catalog_name: silver          # same physical catalog, different schema
-  silver_schema_name: silver_crm
+  silver_schema_name: ${silver_schema}
   dq_enabled: true
   quarantine_enabled: true
   deduplicate: true

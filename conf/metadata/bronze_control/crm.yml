@@ -3,12 +3,13 @@
 # -------------------------------------------------------------------------------------
 # Differences from the ADLS version:
 #
-#   * file_location is a UC Volume path, not abfss://. notebooks/02_generate_sample_data.py
-#     writes the sample files into these exact paths.
+#   * file_location is a UC Volume path, not abfss://. ${landing_root} expands to the
+#     landing Volume named in conf/framework.<env>.yml, so renaming the catalog there
+#     needs no edit here. notebooks/02_generate_sample_data.py writes into these paths.
 #
-#   * bronze_schema_name is bronze_crm, not crm. All three layers share one catalog on
-#     Free Edition, so if bronze and silver both used schema "crm" they would resolve to
-#     the same table and the silver load would overwrite its own source.
+#   * ${bronze_schema} is bronze_crm by default, not crm. When all three layers share one
+#     catalog, bronze and silver both using schema "crm" would resolve to the same table
+#     and the silver load would overwrite its own source.
 #
 #   * The interaction_event feed is load_type: batch, not stream. Free Edition has no
 #     cloud queue for file notifications, and a continuously triggered query would hold a
@@ -18,7 +19,7 @@
 defaults:
   source_system: crm
   target_catalog_name: bronze          # logical token -> the single Free Edition catalog
-  bronze_schema_name: bronze_crm
+  bronze_schema_name: ${bronze_schema}
   load_type: batch
   schema_evolution_mode: addNewColumns
   add_ingestion_metadata: true
@@ -33,7 +34,7 @@ bronze_control:
   - source_entity_name: CUSTOMER
     bronze_table_name: customer
     source_file_type: csv
-    file_location: /Volumes/workspace/etl_volumes/landing/crm/customer/
+    file_location: ${landing_root}/crm/customer/
     source_file_pattern: "*.csv"
     reader_options:
       header: true
@@ -56,7 +57,7 @@ bronze_control:
   - source_entity_name: SALES_ORDER
     bronze_table_name: sales_order
     source_file_type: json
-    file_location: /Volumes/workspace/etl_volumes/landing/crm/sales_order/
+    file_location: ${landing_root}/crm/sales_order/
     source_file_pattern: "*.json"
     reader_options:
       # The generator writes JSON Lines - one object per line.
@@ -74,7 +75,7 @@ bronze_control:
   - source_entity_name: INTERACTION_EVENT
     bronze_table_name: interaction_event
     source_file_type: parquet
-    file_location: /Volumes/workspace/etl_volumes/landing/crm/interaction_event/
+    file_location: ${landing_root}/crm/interaction_event/
     load_type: batch
     write_mode: append
     partition_columns: [event_date]

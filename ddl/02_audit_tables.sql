@@ -1,7 +1,7 @@
 -- =====================================================================================
 -- Metadata Driven ETL Framework :: AUDIT TABLES (DDL)
 -- -------------------------------------------------------------------------------------
--- Deployed into the framework catalog/schema, e.g. workspace.etl_audit
+-- Deployed into the framework catalog/schema, e.g. etl_lakehouse.etl_audit
 -- ${fw_catalog} / ${fw_audit_schema} are substituted by notebooks/00_setup_framework.py
 --
 -- batch_id threads every row across every audit table: it is the master workflow job

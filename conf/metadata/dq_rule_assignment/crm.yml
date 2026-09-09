@@ -2,8 +2,8 @@
 # DQ rule assignments - CRM  [FREE EDITION]
 # -------------------------------------------------------------------------------------
 # catalog_name / schema_name / table_name name the SOURCE table the silver task reads -
-# the bronze table - because that is where the check runs. On Free Edition the bronze
-# schema is bronze_crm.
+# the bronze table - because that is where the check runs. ${bronze_schema} resolves from
+# conf/framework.<env>.yml.
 #
 # The sample data in notebooks/02_generate_sample_data.py is built to trip the `drop` and
 # `warning` rules below, so a first run visibly quarantines rows without failing. The two
@@ -13,7 +13,7 @@
 
 defaults:
   catalog_name: bronze
-  schema_name: bronze_crm
+  schema_name: ${bronze_schema}
   is_enabled: true
 
 dq_rules_assignment:
@@ -86,15 +86,14 @@ dq_rules_assignment:
   # pointing this at silver_crm.customer would race on a first run, because the silver
   # tables load concurrently.
   #
-  # NOTE: reference_table is a literal three-part name, so it is the one place in this
-  # metadata that is environment specific. Change the catalog here if yours is not
-  # `workspace`.
+  # reference_table needs a real three-part name, so it is built from tokens rather than
+  # hard-coded - rename the catalog in conf/framework.<env>.yml and this follows.
   - table_name: sales_order
     column_name: customer_id
     rule_id: DQ_REFERENCE_EXISTS
     severity: warning
     rule_parameters:
-      reference_table: workspace.bronze_crm.customer
+      reference_table: ${bronze_catalog}.${bronze_schema}.customer
       reference_column: customer_id
 
   # Sample order 2004 has a negative amount -> quarantined and excluded.

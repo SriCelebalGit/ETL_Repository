@@ -11,7 +11,7 @@
 
 defaults:
   target_catalog_name: gold
-  target_schema_name: gold_sales
+  target_schema_name: ${gold_schema}
   is_enabled: true
 
 gold_control:
@@ -57,8 +57,8 @@ gold_control:
     load_type: delete_insert
     business_keys: [order_id]
     depends_on:
-      - gold.gold_sales.dim_customer
-      - gold.gold_sales.dim_date
+      - gold.${gold_schema}.dim_customer
+      - gold.${gold_schema}.dim_date
     partition_columns: [order_date]
     parameters:
       lookback_days: "30"
@@ -72,6 +72,6 @@ gold_control:
     sql_file_name: agg_daily_sales_by_segment.sql
     load_type: overwrite
     depends_on:
-      - gold.gold_sales.fct_sales
-      - gold.gold_sales.dim_customer
+      - gold.${gold_schema}.fct_sales
+      - gold.${gold_schema}.dim_customer
     cluster_by: [order_date]

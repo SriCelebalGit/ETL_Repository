@@ -7,12 +7,16 @@ foreachBatch at 2am.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from framework.config import FrameworkConfig
 from framework.exceptions import ConfigurationError, ControlTableError
 from framework.models import BronzeConfig, DQRule, GoldConfig, SilverConfig
 from framework.spark_utils import normalise_column_name, sha256_of_payload
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # =====================================================================================
@@ -65,12 +69,146 @@ def test_free_edition_block_is_surfaced():
             "framework_catalog": "workspace",
             "catalogs": {"bronze": "workspace", "silver": "workspace", "gold": "workspace"},
             "checkpoint_root": "/Volumes/workspace/etl_volumes/checkpoints",
-            "free_edition": {"volumes_schema": "etl_volumes", "layer_schemas": ["bronze_crm"]},
+            "free_edition": {
+                "create_catalogs": True,
+                "volumes_schema": "etl_volumes",
+                # A mapping, so each schema is created in its own layer's catalog.
+                "layer_schemas": {"bronze": ["bronze_crm"], "silver": ["silver_crm"]},
+            },
         },
         environment="free",
     )
     assert cfg.free_edition["volumes_schema"] == "etl_volumes"
-    assert cfg.free_edition["layer_schemas"] == ["bronze_crm"]
+    assert cfg.free_edition["create_catalogs"] is True
+    assert cfg.free_edition["layer_schemas"]["bronze"] == ["bronze_crm"]
+
+
+# =====================================================================================
+# vars block - one place to write a physical name
+# =====================================================================================
+def test_vars_are_expanded_across_the_whole_config():
+    """Changing vars.catalog must move every derived name with it."""
+    cfg = FrameworkConfig.from_dict(
+        {
+            "vars": {"catalog": "etl_framework", "volumes_schema": "etl_volumes"},
+            "framework_catalog": "${catalog}",
+            "control_schema": "etl_control",
+            "catalogs": {"bronze": "${catalog}", "silver": "${catalog}", "gold": "${catalog}"},
+            "checkpoint_root": "/Volumes/${catalog}/${volumes_schema}/checkpoints",
+        },
+        environment="free",
+    )
+    assert cfg.framework_catalog == "etl_framework"
+    assert cfg.catalogs == {"bronze": "etl_framework", "silver": "etl_framework", "gold": "etl_framework"}
+    assert cfg.checkpoint_root == "/Volumes/etl_framework/etl_volumes/checkpoints"
+    assert cfg.control_table("bronze_control_table") == "etl_framework.etl_control.bronze_control_table"
+
+
+def test_renaming_the_catalog_var_is_the_only_edit_needed():
+    def build(catalog):
+        return FrameworkConfig.from_dict(
+            {
+                "vars": {"catalog": catalog, "volumes_schema": "etl_volumes"},
+                "framework_catalog": "${catalog}",
+                "catalogs": {"bronze": "${catalog}", "silver": "${catalog}", "gold": "${catalog}"},
+                "checkpoint_root": "/Volumes/${catalog}/${volumes_schema}/checkpoints",
+            },
+            environment="free",
+        )
+
+    for catalog in ("etl_framework", "etl_lakehouse", "workspace", "my_sandbox"):
+        cfg = build(catalog)
+        assert cfg.framework_catalog == catalog
+        assert cfg.resolve_catalog("bronze") == catalog
+        assert cfg.checkpoint_root == f"/Volumes/{catalog}/etl_volumes/checkpoints"
+
+
+def test_a_var_may_reference_another_var():
+    cfg = FrameworkConfig.from_dict(
+        {
+            "vars": {
+                "catalog": "etl_framework",
+                "volumes_schema": "etl_volumes",
+                # built from two other vars
+                "volumes_root": "/Volumes/${catalog}/${volumes_schema}",
+            },
+            "framework_catalog": "${catalog}",
+            "catalogs": {"bronze": "${catalog}", "silver": "${catalog}", "gold": "${catalog}"},
+            "checkpoint_root": "${volumes_root}/checkpoints",
+        },
+        environment="free",
+    )
+    assert cfg.checkpoint_root == "/Volumes/etl_framework/etl_volumes/checkpoints"
+    assert cfg.vars["volumes_root"] == "/Volumes/etl_framework/etl_volumes"
+
+
+def test_env_token_still_works_alongside_vars():
+    cfg = FrameworkConfig.from_dict(
+        {
+            "vars": {"catalog": "etl_${env}"},
+            "framework_catalog": "${catalog}",
+            "catalogs": {"bronze": "${catalog}", "silver": "${catalog}", "gold": "${catalog}"},
+            "checkpoint_root": "/Volumes/${catalog}/v/checkpoints",
+        },
+        environment="free",
+    )
+    assert cfg.framework_catalog == "etl_free"
+
+
+def test_unknown_placeholder_is_rejected():
+    """A pass-through would produce a catalog literally named "${catlog}"."""
+    with pytest.raises(ConfigurationError, match=r"unknown placeholder"):
+        FrameworkConfig.from_dict(
+            {
+                "vars": {"catalog": "etl_framework"},
+                "framework_catalog": "${catlog}",
+                "catalogs": {"bronze": "c", "silver": "c", "gold": "c"},
+                "checkpoint_root": "/Volumes/c/v/checkpoints",
+            },
+            environment="free",
+        )
+
+
+def test_circular_vars_are_reported():
+    with pytest.raises(ConfigurationError, match=r"could not be resolved"):
+        FrameworkConfig.from_dict(
+            {
+                "vars": {"a": "${b}", "b": "${a}"},
+                "framework_catalog": "x",
+                "catalogs": {"bronze": "x", "silver": "x", "gold": "x"},
+                "checkpoint_root": "/Volumes/x/v/checkpoints",
+            },
+            environment="free",
+        )
+
+
+def test_vars_are_exposed_for_the_metadata_token_scope():
+    cfg = FrameworkConfig.from_dict(
+        {
+            "vars": {"catalog": "etl_framework", "bronze_schema": "bronze_crm"},
+            "framework_catalog": "${catalog}",
+            "catalogs": {"bronze": "${catalog}", "silver": "${catalog}", "gold": "${catalog}"},
+            "checkpoint_root": "/Volumes/${catalog}/v/checkpoints",
+        },
+        environment="free",
+    )
+    # env is excluded - the metadata loader supplies it from cfg.environment instead.
+    assert cfg.vars["catalog"] == "etl_framework"
+    assert cfg.vars["bronze_schema"] == "bronze_crm"
+    assert "env" not in cfg.vars
+
+
+def test_shipped_free_config_loads_and_resolves():
+    """The real conf/framework.free.yml must have no unresolved placeholders."""
+    cfg = FrameworkConfig.load(environment="free", conf_dir=str(REPO_ROOT / "conf"))
+    catalog = cfg.vars["catalog"]
+    assert cfg.framework_catalog == catalog
+    assert set(cfg.catalogs.values()) == {catalog}
+    assert cfg.checkpoint_root.startswith(f"/Volumes/{catalog}/")
+    # Under one catalog the layer schemas must differ, or bronze and silver collide.
+    layer_schemas = cfg.free_edition["layer_schemas"]
+    flat = [s for schemas in layer_schemas.values() for s in schemas]
+    assert len(flat) == len(set(flat)), f"layer schemas collide: {flat}"
 
 
 def test_missing_checkpoint_root_is_rejected():

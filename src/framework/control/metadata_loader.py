@@ -18,6 +18,7 @@ YAML change is a no-op instead of a new version per row per run.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,9 @@ from ..config import FrameworkConfig
 from ..exceptions import MetadataValidationError
 from ..logging_utils import FrameworkLogger
 from ..spark_utils import sha256_of_payload
+
+# ${name} placeholders expanded inside metadata YAML - see MetadataLoader.token_scope.
+_TOKEN_RE = re.compile(r"\$\{([a-zA-Z0-9_]+)\}")
 
 _STR = StringType()
 _ARR = ArrayType(StringType())
@@ -382,8 +386,79 @@ class MetadataLoader:
                     raise MetadataValidationError(f"{path.name}: every entry must be a mapping")
                 merged = {**defaults, **entry}
                 merged["config_file_name"] = path.name
-                records.append(merged)
+                records.append(self._render_tokens(merged, path.name))
         return records, file_names
+
+    # ---------------------------------------------------------------------------
+    # token expansion
+    # ---------------------------------------------------------------------------
+    def token_scope(self) -> Dict[str, str]:
+        """Values available as ${token} inside a metadata YAML file.
+
+        Landing paths and reference tables are the two places a metadata file has to
+        name something physical. Without tokens, renaming a catalog in
+        conf/framework.<env>.yml would silently leave those pointing at the old one -
+        Auto Loader would find no files, and the referential DQ check would fail on a
+        table-not-found. These make both follow the config.
+        """
+        free = self.cfg.free_edition or {}
+        volumes_catalog = free.get("volumes_catalog") or self.cfg.framework_catalog
+        volumes_schema = free.get("volumes_schema", "etl_volumes")
+        landing_volume = free.get("landing_volume", "landing")
+
+        # Names from the yml's `vars:` block come first, so a metadata file can use the
+        # same ${catalog} it was declared with. The derived tokens below take precedence,
+        # because they are authoritative for what the framework will actually read.
+        scope = dict(self.cfg.vars or {})
+        scope.update({
+            "env": self.cfg.environment,
+            "framework_catalog": self.cfg.framework_catalog,
+            "control_schema": self.cfg.control_schema,
+            "audit_schema": self.cfg.audit_schema,
+            "checkpoint_root": self.cfg.checkpoint_root,
+            "landing_root": f"/Volumes/{volumes_catalog}/{volumes_schema}/{landing_volume}",
+        })
+        # ${bronze_catalog} / ${silver_catalog} / ${gold_catalog}, resolved per layer.
+        for layer, catalog in self.cfg.catalogs.items():
+            scope[f"{layer}_catalog"] = catalog
+        # ${bronze_schema} etc., from the framework defaults block.
+        for layer in ("bronze", "silver", "gold"):
+            default_schema = self.cfg.default_for(f"{layer}_schema")
+            if default_schema:
+                scope[f"{layer}_schema"] = str(default_schema)
+        return scope
+
+    def _render_tokens(self, node: Any, file_name: str) -> Any:
+        """Recursively expand ${token} in every string of a metadata record."""
+        scope = self.token_scope()
+
+        def render(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {k: render(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [render(v) for v in value]
+            if not isinstance(value, str) or "${" not in value:
+                return value
+
+            def replace(match: "re.Match") -> str:
+                key = match.group(1)
+                if key not in scope:
+                    raise MetadataValidationError(
+                        f"{file_name}: unknown placeholder ${{{key}}}. "
+                        f"Available: {sorted(scope)}"
+                    )
+                return scope[key]
+
+            rendered = _TOKEN_RE.sub(replace, value)
+            # A surviving ${ means a malformed placeholder, e.g. ${foo without the brace.
+            if "${" in rendered:
+                raise MetadataValidationError(
+                    f"{file_name}: malformed placeholder in {value!r} - "
+                    f"expected the form ${{name}}"
+                )
+            return rendered
+
+        return render(node)
 
     # ---------------------------------------------------------------------------
     # validation

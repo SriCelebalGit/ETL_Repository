@@ -26,6 +26,32 @@ from pyspark.sql.types import ArrayType, BooleanType, IntegerType, MapType, Stri
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _token_config(catalog: str = "etl_lakehouse"):
+    """A config shaped like conf/framework.free.yml, for token expansion in tests."""
+    from framework.config import FrameworkConfig
+
+    return FrameworkConfig.from_dict(
+        {
+            "framework_catalog": catalog,
+            "control_schema": "etl_control",
+            "audit_schema": "etl_audit",
+            "catalogs": {"bronze": catalog, "silver": catalog, "gold": catalog},
+            "checkpoint_root": f"/Volumes/{catalog}/etl_volumes/checkpoints",
+            "free_edition": {
+                "volumes_catalog": catalog,
+                "volumes_schema": "etl_volumes",
+                "landing_volume": "landing",
+            },
+            "defaults": {
+                "bronze_schema": "bronze_crm",
+                "silver_schema": "silver_crm",
+                "gold_schema": "gold_sales",
+            },
+        },
+        environment="free",
+    )
+
+
 class _LoaderUnderTest(MetadataLoader):
     """MetadataLoader with the Spark dependencies stubbed out.
 
@@ -33,9 +59,10 @@ class _LoaderUnderTest(MetadataLoader):
     and would triple the test runtime.
     """
 
-    def __init__(self, metadata_dir):
+    def __init__(self, metadata_dir, cfg=None):
         self.spark = None
-        self.cfg = None
+        # Token expansion reads the config, so the stub needs a real one.
+        self.cfg = cfg if cfg is not None else _token_config()
         self.metadata_dir = Path(metadata_dir)
 
         class _Log:
@@ -268,3 +295,116 @@ def test_shipped_sample_metadata_validates(spec):
     records, _ = loader._read_yaml_dir(spec)
     if records:
         loader._validate(spec, records)
+
+
+# =====================================================================================
+# token expansion
+# =====================================================================================
+def test_landing_root_token_expands_from_the_config(tmp_path):
+    """The whole point: rename the catalog in the config and the metadata follows."""
+    _write(
+        tmp_path,
+        "bronze_control",
+        "crm.yml",
+        {
+            "bronze_control": [
+                {
+                    "source_system": "crm",
+                    "source_file_type": "csv",
+                    "file_location": "${landing_root}/crm/customer/",
+                    "target_catalog_name": "bronze",
+                    "bronze_schema_name": "${bronze_schema}",
+                    "bronze_table_name": "customer",
+                    "load_type": "batch",
+                }
+            ]
+        },
+    )
+    records, _ = _LoaderUnderTest(tmp_path)._read_yaml_dir(BRONZE_SPEC)
+    assert records[0]["file_location"] == "/Volumes/etl_lakehouse/etl_volumes/landing/crm/customer/"
+    assert records[0]["bronze_schema_name"] == "bronze_crm"
+
+
+def test_renaming_the_catalog_moves_the_landing_path(tmp_path):
+    _write(
+        tmp_path,
+        "bronze_control",
+        "crm.yml",
+        {
+            "bronze_control": [
+                {
+                    "source_system": "crm",
+                    "source_file_type": "csv",
+                    "file_location": "${landing_root}/crm/customer/",
+                    "target_catalog_name": "bronze",
+                    "bronze_schema_name": "bronze_crm",
+                    "bronze_table_name": "customer",
+                    "load_type": "batch",
+                }
+            ]
+        },
+    )
+    loader = _LoaderUnderTest(tmp_path, cfg=_token_config(catalog="my_own_catalog"))
+    records, _ = loader._read_yaml_dir(BRONZE_SPEC)
+    assert records[0]["file_location"].startswith("/Volumes/my_own_catalog/")
+
+
+def test_tokens_expand_inside_nested_maps_and_lists(tmp_path):
+    _write(
+        tmp_path,
+        "dq_rule_assignment",
+        "crm.yml",
+        {
+            "dq_rules_assignment": [
+                {
+                    "catalog_name": "bronze",
+                    "schema_name": "${bronze_schema}",
+                    "table_name": "sales_order",
+                    "column_name": "customer_id",
+                    "rule_id": "DQ_REFERENCE_EXISTS",
+                    "severity": "warning",
+                    # a map value, which is where reference_table lives
+                    "rule_parameters": {
+                        "reference_table": "${bronze_catalog}.${bronze_schema}.customer",
+                        "reference_column": "customer_id",
+                    },
+                }
+            ]
+        },
+    )
+    records, _ = _LoaderUnderTest(tmp_path)._read_yaml_dir(DQ_ASSIGNMENT_SPEC)
+    params = records[0]["rule_parameters"]
+    assert params["reference_table"] == "etl_lakehouse.bronze_crm.customer"
+
+
+def test_unknown_token_is_reported_with_the_valid_names(tmp_path):
+    _write(
+        tmp_path,
+        "bronze_control",
+        "crm.yml",
+        {
+            "bronze_control": [
+                {
+                    "source_system": "crm",
+                    "source_file_type": "csv",
+                    "file_location": "${landing_rooot}/crm/customer/",
+                    "target_catalog_name": "bronze",
+                    "bronze_schema_name": "bronze_crm",
+                    "bronze_table_name": "customer",
+                    "load_type": "batch",
+                }
+            ]
+        },
+    )
+    with pytest.raises(MetadataValidationError, match=r"unknown placeholder"):
+        _LoaderUnderTest(tmp_path)._read_yaml_dir(BRONZE_SPEC)
+
+
+def test_shipped_metadata_has_no_unresolved_tokens():
+    """Guards the real conf/metadata against a typo'd placeholder."""
+    loader = _LoaderUnderTest(REPO_ROOT / "conf" / "metadata")
+    for spec in (BRONZE_SPEC, SILVER_SPEC, DQ_ASSIGNMENT_SPEC, GOLD_SPEC):
+        records, _ = loader._read_yaml_dir(spec)
+        for record in records:
+            for key, value in record.items():
+                assert "${" not in str(value), f"{spec.table_name}.{key} still holds a token: {value!r}"

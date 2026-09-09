@@ -51,6 +51,11 @@ class FrameworkConfig:
     # --- defaults applied when the control row leaves a column NULL ------------------
     defaults: Dict[str, Any] = field(default_factory=dict)
 
+    # --- names declared in the yml's `vars:` block ------------------------------------
+    # Kept so the metadata loader can offer the same ${name} tokens inside
+    # conf/metadata/**.yml, not just inside this file.
+    vars: Dict[str, str] = field(default_factory=dict)
+
     # --- Free Edition namespace setup ------------------------------------------------
     # Read only by notebooks/00_setup_framework.py, which creates the Volumes and layer
     # schemas. The framework's runtime path never touches it.
@@ -86,8 +91,11 @@ class FrameworkConfig:
         if not env:
             raise ConfigurationError("environment must be set in the framework config or passed explicitly")
 
-        # ${env} placeholders inside the yml are expanded against the resolved values.
-        scope = {"env": env}
+        # A `vars:` block at the top of the yml defines names usable as ${name} anywhere
+        # else in the file, so a catalog is written once and referenced everywhere.
+        # ${env} is always available.
+        declared_vars = {str(k): str(v) for k, v in (raw.get("vars") or {}).items()}
+        scope = _resolve_scope({"env": env, **declared_vars})
         resolved = _expand_tokens(raw, scope)
 
         try:
@@ -104,6 +112,7 @@ class FrameworkConfig:
             checkpoint_root=resolved.get("checkpoint_root", ""),
             quarantine_schema_suffix=resolved.get("quarantine_schema_suffix", ""),
             defaults=dict(resolved.get("defaults", {})),
+            vars={k: v for k, v in scope.items() if k != "env"},
             free_edition=dict(resolved.get("free_edition", {})),
             log_level=resolved.get("log_level", "INFO"),
             framework_version=resolved.get("framework_version", "1.0.0"),
@@ -175,12 +184,63 @@ def _default_conf_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "conf"
 
 
+_MAX_VAR_PASSES = 10
+
+
+def _resolve_scope(scope: Dict[str, str]) -> Dict[str, str]:
+    """Expand variables that reference other variables.
+
+    Lets one var build on another - `catalog: etl_framework` then
+    `volumes_root: /Volumes/${catalog}/${volumes_schema}` - which is what keeps a
+    physical name written exactly once. Resolved by repeated passes rather than a
+    dependency graph: the blocks are a handful of entries, and a cycle is reported
+    rather than looping forever.
+    """
+    resolved = dict(scope)
+    for _ in range(_MAX_VAR_PASSES):
+        changed = False
+        for key, value in list(resolved.items()):
+            if "${" not in value:
+                continue
+            expanded = _TOKEN_RE.sub(lambda m: resolved.get(m.group(1), m.group(0)), value)
+            if expanded != value:
+                resolved[key] = expanded
+                changed = True
+        if not changed:
+            break
+
+    unresolved = {k: v for k, v in resolved.items() if "${" in v}
+    if unresolved:
+        raise ConfigurationError(
+            f"vars could not be resolved: {unresolved}. Either a name is misspelled, or two "
+            f"vars reference each other in a cycle. Available names: {sorted(resolved)}"
+        )
+    return resolved
+
+
 def _expand_tokens(node: Any, scope: Dict[str, str]) -> Any:
-    """Recursively expand ${key} placeholders using `scope`."""
+    """Recursively expand ${key} placeholders using `scope`.
+
+    Unknown placeholders are an error, not a pass-through: a config that silently
+    produced a catalog literally named "${catalog}" would fail much later, with a
+    confusing message from Unity Catalog instead of from here.
+    """
     if isinstance(node, dict):
         return {k: _expand_tokens(v, scope) for k, v in node.items()}
     if isinstance(node, list):
         return [_expand_tokens(v, scope) for v in node]
     if isinstance(node, str):
-        return _TOKEN_RE.sub(lambda m: scope.get(m.group(1), m.group(0)), node)
+        if "${" not in node:
+            return node
+
+        def replace(match: "re.Match") -> str:
+            key = match.group(1)
+            if key not in scope:
+                raise ConfigurationError(
+                    f"unknown placeholder ${{{key}}} in the framework config. "
+                    f"Declare it under `vars:` or use one of: {sorted(scope)}"
+                )
+            return scope[key]
+
+        return _TOKEN_RE.sub(replace, node)
     return node
