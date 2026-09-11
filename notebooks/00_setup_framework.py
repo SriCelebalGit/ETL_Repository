@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # 00 - Framework setup (Free Edition)
 # MAGIC
@@ -77,26 +81,81 @@ log.info(
 # MAGIC `CREATE CATALOG` can be refused on a Free Edition workspace. Rather than let that
 # MAGIC surface as an opaque failure 40 statements later, each attempt is checked: if the
 # MAGIC catalog exists afterwards we continue, and if not the error explains the fallback.
+# MAGIC
+# MAGIC
+# MAGIC def list_catalogs() -> set:
+# MAGIC     """Catalog names visible to this principal. Read positionally - the column name
+# MAGIC     of SHOW CATALOGS has differed between runtimes."""
+# MAGIC     return {row[0] for row in spark.sql("SHOW CATALOGS").collect()}
+# MAGIC
+# MAGIC
+# MAGIC # framework_catalog first: it holds the control tables everything else depends on.
+# MAGIC required_catalogs = [cfg.framework_catalog]
+# MAGIC for catalog in cfg.catalogs.values():
+# MAGIC     if catalog not in required_catalogs:
+# MAGIC         required_catalogs.append(catalog)
+# MAGIC if volumes_catalog not in required_catalogs:
+# MAGIC     required_catalogs.append(volumes_catalog)
+# MAGIC
+# MAGIC existing = list_catalogs()
+# MAGIC log.info("catalogs already visible", catalogs=sorted(existing))
+# MAGIC
+# MAGIC created, reused, failed = [], [], {}
+# MAGIC
+# MAGIC for catalog in required_catalogs:
+# MAGIC     if catalog in existing:
+# MAGIC         reused.append(catalog)
+# MAGIC         log.info("catalog already exists", catalog=catalog)
+# MAGIC         continue
+# MAGIC
+# MAGIC     if not create_catalogs:
+# MAGIC         failed[catalog] = "create_catalogs is false in the config and the catalog does not exist"
+# MAGIC         continue
+# MAGIC
+# MAGIC     try:
+# MAGIC         spark.sql(f"CREATE CATALOG IF NOT EXISTS `{catalog}`")
+# MAGIC         spark.sql(
+# MAGIC             f"COMMENT ON CATALOG `{catalog}` IS "
+# MAGIC             f"'Created by the metadata driven ETL framework setup ({cfg.environment})'"
+# MAGIC         )
+# MAGIC         created.append(catalog)
+# MAGIC         log.info("catalog created", catalog=catalog)
+# MAGIC     except Exception as exc:
+# MAGIC         # Re-check: another task in the same job may have created it concurrently.
+# MAGIC         if catalog in list_catalogs():
+# MAGIC             reused.append(catalog)
+# MAGIC             log.info("catalog appeared concurrently", catalog=catalog)
+# MAGIC         else:
+# MAGIC             failed[catalog] = str(exc)[:400]
+# MAGIC             log.error("catalog creation failed", catalog=catalog, detail=str(exc)[:400])
 
+# COMMAND ----------
 
 def list_catalogs() -> set:
-    """Catalog names visible to this principal. Read positionally - the column name
-    of SHOW CATALOGS has differed between runtimes."""
+    """
+    Catalog names visible to this principal.
+
+    Read positionally because the column name returned by
+    SHOW CATALOGS differs across Databricks runtimes.
+    """
     return {row[0] for row in spark.sql("SHOW CATALOGS").collect()}
 
 
-# framework_catalog first: it holds the control tables everything else depends on.
 required_catalogs = [cfg.framework_catalog]
+
 for catalog in cfg.catalogs.values():
     if catalog not in required_catalogs:
         required_catalogs.append(catalog)
+
 if volumes_catalog not in required_catalogs:
     required_catalogs.append(volumes_catalog)
 
 existing = list_catalogs()
 log.info("catalogs already visible", catalogs=sorted(existing))
 
-created, reused, failed = [], [], {}
+created = []
+reused = []
+failed = {}
 
 for catalog in required_catalogs:
     if catalog in existing:
@@ -105,17 +164,22 @@ for catalog in required_catalogs:
         continue
 
     if not create_catalogs:
-        failed[catalog] = "create_catalogs is false in the config and the catalog does not exist"
+        failed[catalog] = (
+            "create_catalogs is false in the config and the catalog does not exist"
+        )
         continue
 
     try:
         spark.sql(f"CREATE CATALOG IF NOT EXISTS `{catalog}`")
+
         spark.sql(
             f"COMMENT ON CATALOG `{catalog}` IS "
             f"'Created by the metadata driven ETL framework setup ({cfg.environment})'"
         )
+
         created.append(catalog)
         log.info("catalog created", catalog=catalog)
+
     except Exception as exc:
         # Re-check: another task in the same job may have created it concurrently.
         if catalog in list_catalogs():
@@ -123,7 +187,11 @@ for catalog in required_catalogs:
             log.info("catalog appeared concurrently", catalog=catalog)
         else:
             failed[catalog] = str(exc)[:400]
-            log.error("catalog creation failed", catalog=catalog, detail=str(exc)[:400])
+            log.error(
+                "catalog creation failed",
+                catalog=catalog,
+                detail=str(exc)[:400],
+            )
 
 # COMMAND ----------
 
@@ -151,7 +219,31 @@ print(f"reused:  {reused or 'none'}")
 # MAGIC `split_sql_statements` splits on top-level semicolons only — the DDL's `COMMENT`
 # MAGIC literals contain semicolons, which a naive `split(";")` would treat as statement
 # MAGIC boundaries. The DDL creates its own schemas.
+# MAGIC
+# MAGIC
+# MAGIC def run_ddl(path: Path) -> int:
+# MAGIC     script = render_placeholders(
+# MAGIC         path.read_text(encoding="utf-8"),
+# MAGIC         {
+# MAGIC             "fw_catalog": cfg.framework_catalog,
+# MAGIC             "fw_schema": cfg.control_schema,
+# MAGIC             "fw_audit_schema": cfg.audit_schema,
+# MAGIC         },
+# MAGIC     )
+# MAGIC     statements = split_sql_statements(script)
+# MAGIC     for statement in statements:
+# MAGIC         spark.sql(statement)
+# MAGIC     log.info("DDL applied", file=path.name, statement_count=len(statements))
+# MAGIC     return len(statements)
+# MAGIC
+# MAGIC
+# MAGIC total = 0
+# MAGIC for ddl_file in sorted((repo_root / "ddl").glob("*.sql")):
+# MAGIC     total += run_ddl(ddl_file)
+# MAGIC
+# MAGIC log.info("DDL complete", statements_executed=total)
 
+# COMMAND ----------
 
 def run_ddl(path: Path) -> int:
     script = render_placeholders(
@@ -162,18 +254,30 @@ def run_ddl(path: Path) -> int:
             "fw_audit_schema": cfg.audit_schema,
         },
     )
+
     statements = split_sql_statements(script)
+
     for statement in statements:
         spark.sql(statement)
-    log.info("DDL applied", file=path.name, statement_count=len(statements))
+
+    log.info(
+        "DDL applied",
+        file=path.name,
+        statement_count=len(statements),
+    )
+
     return len(statements)
 
 
 total = 0
+
 for ddl_file in sorted((repo_root / "ddl").glob("*.sql")):
     total += run_ddl(ddl_file)
 
-log.info("DDL complete", statements_executed=total)
+log.info(
+    "DDL complete",
+    statements_executed=total,
+)
 
 # COMMAND ----------
 
@@ -186,18 +290,46 @@ log.info("DDL complete", statements_executed=total)
 # MAGIC `checkpoints` holds Auto Loader's schema store and streaming checkpoints. Treat it
 # MAGIC as data, not cache: deleting a feed's directory under it makes that feed re-ingest
 # MAGIC its entire history.
+# MAGIC
+# MAGIC spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{volumes_catalog}`.`{volumes_schema}`")
+# MAGIC
+# MAGIC volume_paths = {}
+# MAGIC for volume in (landing_volume, checkpoint_volume):
+# MAGIC     spark.sql(f"CREATE VOLUME IF NOT EXISTS `{volumes_catalog}`.`{volumes_schema}`.`{volume}`")
+# MAGIC     path = f"/Volumes/{volumes_catalog}/{volumes_schema}/{volume}"
+# MAGIC     volume_paths[volume] = path
+# MAGIC     log.info("volume ready", volume=f"{volumes_catalog}.{volumes_schema}.{volume}", path=path)
+# MAGIC
+# MAGIC print(f"landing     {volume_paths[landing_volume]}")
+# MAGIC print(f"checkpoints {volume_paths[checkpoint_volume]}")
 
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{volumes_catalog}`.`{volumes_schema}`")
+# COMMAND ----------
+
+spark.sql(
+    f"CREATE SCHEMA IF NOT EXISTS {volumes_catalog}.{volumes_schema}"
+)
 
 volume_paths = {}
-for volume in (landing_volume, checkpoint_volume):
-    spark.sql(f"CREATE VOLUME IF NOT EXISTS `{volumes_catalog}`.`{volumes_schema}`.`{volume}`")
-    path = f"/Volumes/{volumes_catalog}/{volumes_schema}/{volume}"
-    volume_paths[volume] = path
-    log.info("volume ready", volume=f"{volumes_catalog}.{volumes_schema}.{volume}", path=path)
 
-print(f"landing     {volume_paths[landing_volume]}")
+for volume in (landing_volume, checkpoint_volume):
+    spark.sql(
+        f"CREATE VOLUME IF NOT EXISTS "
+        f"{volumes_catalog}.{volumes_schema}.{volume}"
+    )
+
+    path = f"/Volumes/{volumes_catalog}/{volumes_schema}/{volume}"
+
+    volume_paths[volume] = path
+
+    log.info(
+        "volume ready",
+        volume=f"{volumes_catalog}.{volumes_schema}.{volume}",
+        path=path,
+    )
+
+print(f"landing {volume_paths[landing_volume]}")
 print(f"checkpoints {volume_paths[checkpoint_volume]}")
+
 
 # COMMAND ----------
 
@@ -222,17 +354,43 @@ log.info("checkpoint_root verified", checkpoint_root=cfg.checkpoint_root)
 # MAGIC Each schema is created in the catalog its own layer resolves to. When all three
 # MAGIC layer tokens point at one catalog, distinct schema names are what keep bronze and
 # MAGIC silver from resolving to the same table — so this step also checks for that.
+# MAGIC
+# MAGIC created_schemas = []
+# MAGIC for layer, schemas in layer_schemas.items():
+# MAGIC     if layer == "__framework__":
+# MAGIC         catalog = cfg.framework_catalog
+# MAGIC     else:
+# MAGIC         catalog = cfg.resolve_catalog(layer)
+# MAGIC     for schema in schemas:
+# MAGIC         spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{catalog}`.`{schema}`")
+# MAGIC         created_schemas.append(f"{catalog}.{schema}")
+# MAGIC         log.info("layer schema ready", layer=layer, schema=f"{catalog}.{schema}")
+# MAGIC
+# MAGIC for entry in created_schemas:
+# MAGIC     print(entry)
+
+# COMMAND ----------
 
 created_schemas = []
+
 for layer, schemas in layer_schemas.items():
-    if layer == "__framework__":
+    if layer == "framework":
         catalog = cfg.framework_catalog
     else:
         catalog = cfg.resolve_catalog(layer)
+
     for schema in schemas:
-        spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{catalog}`.`{schema}`")
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}"
+        )
+
         created_schemas.append(f"{catalog}.{schema}")
-        log.info("layer schema ready", layer=layer, schema=f"{catalog}.{schema}")
+
+        log.info(
+            "layer schema ready",
+            layer=layer,
+            schema=f"{catalog}.{schema}",
+        )
 
 for entry in created_schemas:
     print(entry)
@@ -269,47 +427,136 @@ log.info("no layer namespace collisions")
 # MAGIC the one place in the metadata that names a physical catalog. If you changed the
 # MAGIC catalog in the config but not there, the referential check fails at silver load
 # MAGIC time with a table-not-found. Warn about it now instead.
+# MAGIC
+# MAGIC import re  # noqa: E402
+# MAGIC
+# MAGIC known_catalogs = {cfg.framework_catalog, *cfg.catalogs.values()}
+# MAGIC assignment_dir = repo_root / "conf" / "metadata" / "dq_rule_assignment"
+# MAGIC mismatched = []
+# MAGIC
+# MAGIC for yml in sorted(assignment_dir.glob("*.y*ml")) if assignment_dir.exists() else []:
+# MAGIC     for match in re.finditer(r"reference_table:\s*([A-Za-z0-9_.`-]+)", yml.read_text(encoding="utf-8")):
+# MAGIC         reference = match.group(1).replace("`", "")
+# MAGIC         catalog = reference.split(".")[0]
+# MAGIC         if catalog not in known_catalogs:
+# MAGIC             mismatched.append((yml.name, reference, catalog))
+# MAGIC
+# MAGIC if mismatched:
+# MAGIC     print("WARNING - reference_table values naming a catalog that is not in this config:\n")
+# MAGIC     for file_name, reference, catalog in mismatched:
+# MAGIC         print(f"  {file_name}: {reference}   (catalog {catalog!r} is not one of {sorted(known_catalogs)})")
+# MAGIC     print(
+# MAGIC         f"\nEither this reference genuinely lives elsewhere, or it needs updating to one of "
+# MAGIC         f"{sorted(known_catalogs)}. The silver load will fail on a table-not-found if it is wrong."
+# MAGIC     )
+# MAGIC     log.warning("dq reference_table catalog mismatch", count=len(mismatched))
+# MAGIC else:
+# MAGIC     log.info("dq reference_table catalogs all match the config")
+
+# COMMAND ----------
 
 import re  # noqa: E402
 
-known_catalogs = {cfg.framework_catalog, *cfg.catalogs.values()}
-assignment_dir = repo_root / "conf" / "metadata" / "dq_rule_assignment"
+known_catalogs = {
+    cfg.framework_catalog,
+    *cfg.catalogs.values(),
+}
+
+assignment_dir = (
+    repo_root
+    / "conf"
+    / "metadata"
+    / "dq_rule_assignment"
+)
+
 mismatched = []
 
-for yml in sorted(assignment_dir.glob("*.y*ml")) if assignment_dir.exists() else []:
-    for match in re.finditer(r"reference_table:\s*([A-Za-z0-9_.`-]+)", yml.read_text(encoding="utf-8")):
-        reference = match.group(1).replace("`", "")
+for yml in (
+    sorted(assignment_dir.glob("*.yml"))
+    if assignment_dir.exists()
+    else []
+):
+    content = yml.read_text(encoding="utf-8")
+
+    for match in re.finditer(
+        r"reference_table:\s*([A-Za-z0-9_.-]+)",
+        content,
+    ):
+        reference = match.group(1)
         catalog = reference.split(".")[0]
+
         if catalog not in known_catalogs:
-            mismatched.append((yml.name, reference, catalog))
+            mismatched.append(
+                (yml.name, reference, catalog)
+            )
 
 if mismatched:
-    print("WARNING - reference_table values naming a catalog that is not in this config:\n")
-    for file_name, reference, catalog in mismatched:
-        print(f"  {file_name}: {reference}   (catalog {catalog!r} is not one of {sorted(known_catalogs)})")
     print(
-        f"\nEither this reference genuinely lives elsewhere, or it needs updating to one of "
-        f"{sorted(known_catalogs)}. The silver load will fail on a table-not-found if it is wrong."
+        "WARNING - reference_table values naming a catalog "
+        "that is not in this config:\n"
     )
-    log.warning("dq reference_table catalog mismatch", count=len(mismatched))
+
+    for file_name, reference, catalog in mismatched:
+        print(
+            f"  {file_name}: {reference} "
+            f"(catalog {catalog!r} is not one of "
+            f"{sorted(known_catalogs)})"
+        )
+
+    print(
+        f"\nEither this reference genuinely lives elsewhere, "
+        f"or it needs updating to one of "
+        f"{sorted(known_catalogs)}. "
+        f"The silver load will fail on a table-not-found "
+        f"if it is wrong."
+    )
+
+    log.warning(
+        "dq reference_table catalog mismatch",
+        count=len(mismatched),
+    )
 else:
-    log.info("dq reference_table catalogs all match the config")
+    log.info(
+        "dq reference_table catalogs all match the config"
+    )
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Verify
+# MAGIC
+# MAGIC display(
+# MAGIC     spark.sql(
+# MAGIC         f"""
+# MAGIC         SELECT table_schema, table_name, table_type
+# MAGIC         FROM `{cfg.framework_catalog}`.information_schema.tables
+# MAGIC         WHERE table_schema IN ('{cfg.control_schema}', '{cfg.audit_schema}')
+# MAGIC         ORDER BY table_schema, table_name
+# MAGIC         """
+# MAGIC     )
+# MAGIC )
+
+# COMMAND ----------
 
 display(
     spark.sql(
         f"""
-        SELECT table_schema, table_name, table_type
-        FROM `{cfg.framework_catalog}`.information_schema.tables
-        WHERE table_schema IN ('{cfg.control_schema}', '{cfg.audit_schema}')
-        ORDER BY table_schema, table_name
+        SELECT
+            table_schema,
+            table_name,
+            table_type
+        FROM {cfg.framework_catalog}.information_schema.tables
+        WHERE table_schema IN (
+            '{cfg.control_schema}',
+            '{cfg.audit_schema}'
+        )
+        ORDER BY
+            table_schema,
+            table_name
         """
     )
 )
+
 
 # COMMAND ----------
 

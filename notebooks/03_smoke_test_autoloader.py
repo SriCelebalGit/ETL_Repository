@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # 03 - Auto Loader smoke test (Free Edition)
 # MAGIC
@@ -61,15 +65,20 @@ display(dbutils.fs.ls(SRC))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Test 1 — read from a Volume, checkpoint to a Volume
+# MAGIC Test 1 — read from a Volume, checkpoint to a Volume
 
+# COMMAND ----------
 
 def run_autoloader(label: str) -> int:
     """One availableNow pass. Returns the number of rows this pass ingested."""
-    counted = {"rows": 0}
+
+    def target_count() -> int:
+        return spark.table(TARGET).count() if spark.catalog.tableExists(TARGET) else 0
+
+    before = target_count()
 
     def handle(batch_df, batch_id):
-        counted["rows"] += batch_df.count()
+        # Runs server-side under Spark Connect - no side effects reach this notebook.
         (
             batch_df.write.format("delta")
             .mode("append")
@@ -91,42 +100,49 @@ def run_autoloader(label: str) -> int:
         .start()
     )
     query.awaitTermination()
+
     if query.exception() is not None:
         raise RuntimeError(f"[{label}] stream terminated with an error: {query.exception()}")
-    return counted["rows"]
 
+    return target_count() - before
+
+
+
+# COMMAND ----------
 
 first = run_autoloader("first")
+
 print(f"PASS 1 ingested {first} row(s)")
+
 assert first == 3, f"expected 3 rows on the first pass, got {first}"
 
 # COMMAND ----------
 
-display(spark.table(TARGET))
+# MAGIC %md
+# MAGIC Test 2 — the checkpoint is real
+# MAGIC A second pass over an unchanged directory must ingest nothing. If this returns 3 again, the checkpoint is not persisting to the Volume and every scheduled run would duplicate its whole source.
+
+# COMMAND ----------
+
+second = run_autoloader("second") 
+
+print(f"PASS 2 ingested {second} row(s)") 
+
+assert second == 0, ( f"expected 0 rows on an unchanged directory, got {second}. " f"The checkpoint at {CHK}/_checkpoint is not being persisted." )
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Test 2 — the checkpoint is real
-# MAGIC
-# MAGIC A second pass over an unchanged directory must ingest nothing. If this returns 3
-# MAGIC again, the checkpoint is not persisting to the Volume and every scheduled run would
-# MAGIC duplicate its whole source.
-
-second = run_autoloader("second")
-print(f"PASS 2 ingested {second} row(s)")
-assert second == 0, (
-    f"expected 0 rows on an unchanged directory, got {second}. "
-    f"The checkpoint at {CHK}/_checkpoint is not being persisted."
-)
+# MAGIC Test 3 — a new file is picked up incrementally
 
 # COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Test 3 — a new file is picked up incrementally
 
 with open(f"{SRC}/part_002.csv", "w", encoding="utf-8", newline="\n") as handle:
-    handle.write("id,name,amount\n4,delta,40.75\n5,epsilon,50.0\n")
+    handle.write(
+        "id,name,amount\n"
+        "4,delta,40.75\n"
+        "5,epsilon,50.0\n"
+    )
 
 third = run_autoloader("third")
 print(f"PASS 3 ingested {third} row(s)")
@@ -139,31 +155,33 @@ assert total == 5, f"expected 5 rows in total, got {total}"
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Test 4 — schema store contents
-# MAGIC
-# MAGIC Auto Loader keeps the inferred schema here. Its presence is what makes schema
-# MAGIC evolution work across runs.
+# MAGIC Test 4 — schema store contents
+# MAGIC Auto Loader keeps the inferred schema here. Its presence is what makes schema evolution work across runs.
+
+# COMMAND ----------
 
 display(dbutils.fs.ls(f"{CHK}/_schema"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Clean up
+# MAGIC Clean up
 
-spark.sql(f"DROP TABLE IF EXISTS {TARGET}")
-for path in (SRC, CHK):
-    dbutils.fs.rm(path, recurse=True)
+# COMMAND ----------
+
+spark.sql(f"DROP TABLE IF EXISTS {TARGET}") 
+
+for path in (SRC, CHK): dbutils.fs.rm(path, recurse=True)
 
 print("cleaned up")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Result
+# MAGIC Result
 # MAGIC
-# MAGIC If you got here with no assertion errors, Auto Loader works against UC Volumes on
-# MAGIC this workspace and the framework's core assumption holds. Continue with
-# MAGIC `01_load_control_tables.py`.
+# MAGIC If you got here with no assertion errors, Auto Loader works against UC Volumes on this workspace and the framework's core assumption holds. Continue with 01_load_control_tables.py.
+
+# COMMAND ----------
 
 dbutils.notebook.exit("OK autoloader-on-volumes verified: 3 + 0 + 2 rows across three passes")

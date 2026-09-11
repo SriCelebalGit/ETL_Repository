@@ -50,9 +50,9 @@ vars:
   # Under a single catalog these MUST differ from each other. If bronze and silver both
   # used "crm", then crm.customer would be the same table in both layers and the silver
   # load would overwrite its own source. Notebook 00 fails the setup if it detects that.
-  bronze_schema: bronze_crm
-  silver_schema: silver_crm
-  gold_schema: gold_sales
+  bronze_schema: bronze_db
+  silver_schema: silver_db
+  gold_schema: gold_db
 
 # =====================================================================================
 # Derived - you should not need to edit anything below
