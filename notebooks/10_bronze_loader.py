@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # 10 - Generic bronze loader (Auto Loader)
 # MAGIC
@@ -70,8 +74,11 @@ rt.log.info(
 # MAGIC %md
 # MAGIC ## Ingest
 # MAGIC
-# MAGIC The audit context manager records a RUNNING row, then SUCCEEDED with the metrics or
-# MAGIC FAILED with the stack trace - so a killed task still leaves evidence behind.
+# MAGIC The ingestion step is wrapped in an audit context so that every run is tracked in the audit tables. The audit framework writes a RUNNING record when execution starts, then updates it to SUCCEEDED (with metrics) or FAILED (with the exception details and stack trace). This ensures that even interrupted or terminated jobs leave an audit trail.
+# MAGIC
+# MAGIC
+
+# COMMAND ----------
 
 ingestor = AutoLoaderIngestor(rt.spark, rt.cfg, rt.audit, rt.log)
 

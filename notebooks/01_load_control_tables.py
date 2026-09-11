@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # 01 - Control table load pipeline
 # MAGIC
@@ -43,33 +47,87 @@ loader = MetadataLoader(rt.spark, rt.cfg, logger=rt.log)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Load
+# MAGIC Load
 # MAGIC
-# MAGIC The whole load is audited as one task, so a metadata validation failure is visible in
-# MAGIC `job_run_audit` alongside the data pipeline runs rather than only in the job output.
+# MAGIC The entire load process is wrapped inside an audit context so that both metadata validation failures and data pipeline execution metrics are captured in job_run_audit. This makes operational monitoring simpler because framework-level issues and data loading activities are audited in a single place.
 
-with rt.audit.task(layer="control", catalog_name=rt.cfg.framework_catalog, schema_name=rt.cfg.control_schema) as metrics:
+# COMMAND ----------
+
+with rt.audit.task(
+    layer="control",
+    catalog_name=rt.cfg.framework_catalog,
+    schema_name=rt.cfg.control_schema,
+) as metrics:
+
     if requested.lower() == "all":
-        results = loader.load_all(prune_missing=prune_missing, dry_run=dry_run)
+        results = loader.load_all(
+            prune_missing=prune_missing,
+            dry_run=dry_run,
+        )
     else:
-        names = [n.strip() for n in requested.split(",") if n.strip()]
-        unknown = [n for n in names if n not in TABLE_SPECS]
+        names = [
+            n.strip()
+            for n in requested.split(",")
+            if n.strip()
+        ]
+
+        unknown = [
+            n
+            for n in names
+            if n not in TABLE_SPECS
+        ]
+
         if unknown:
-            raise ValueError(f"Unknown control table(s) {unknown}. Valid: {sorted(TABLE_SPECS)}")
+            raise ValueError(
+                f"Unknown control table(s) {unknown}. "
+                f"Valid: {sorted(TABLE_SPECS)}"
+            )
+
         results = {
-            name: loader.load_table(TABLE_SPECS[name], prune_missing=prune_missing, dry_run=dry_run)
+            name: loader.load_table(
+                TABLE_SPECS[name],
+                prune_missing=prune_missing,
+                dry_run=dry_run,
+            )
             for name in names
         }
 
-    metrics.records_read = sum(r.get("parsed", 0) for r in results.values())
-    metrics.records_inserted = sum(r.get("inserted", 0) for r in results.values())
-    metrics.records_updated = sum(r.get("closed", 0) for r in results.values())
-    metrics.records_deleted = sum(r.get("pruned", 0) for r in results.values())
+    metrics.records_read = sum(
+        r.get("parsed", 0)
+        for r in results.values()
+    )
+
+    metrics.records_inserted = sum(
+        r.get("inserted", 0)
+        for r in results.values()
+    )
+
+    metrics.records_updated = sum(
+        r.get("closed", 0)
+        for r in results.values()
+    )
+
+    metrics.records_deleted = sum(
+        r.get("pruned", 0)
+        for r in results.values()
+    )
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Result
+# MAGIC Result
+# MAGIC
+# MAGIC The load results are converted into a Spark DataFrame and displayed as a summary report. This provides a consolidated view of records processed for each control table.
+# MAGIC
+# MAGIC What the Summary Shows
+# MAGIC control_table: Name of the control table being processed.
+# MAGIC yaml_records: Number of records parsed from the metadata configuration.
+# MAGIC versions_inserted: New records or SCD2 versions inserted.
+# MAGIC versions_closed: Existing versions closed as part of SCD2 processing.
+# MAGIC rows_pruned: Records removed due to pruning logic.
+# MAGIC would_change: Number of rows that would be affected in dry_run mode. Displays NULL during an actual load.
+
+# COMMAND ----------
 
 summary = rt.spark.createDataFrame(
     [
@@ -83,10 +141,22 @@ summary = rt.spark.createDataFrame(
         )
         for table, r in results.items()
     ],
-    "control_table string, yaml_records int, versions_inserted int, versions_closed int, "
-    "rows_pruned int, would_change int",
+    (
+        "control_table string, "
+        "yaml_records int, "
+        "versions_inserted int, "
+        "versions_closed int, "
+        "rows_pruned int, "
+        "would_change int"
+    ),
 )
+
 display(summary)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
 
 # COMMAND ----------
 
